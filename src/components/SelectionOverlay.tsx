@@ -134,15 +134,18 @@ export const SelectionOverlay: React.FC<SelectionOverlayProps> = ({
     const mask = activeSelection.mask;
 
     for (let i = 0; i < total; i++) {
-      const isSelected = mask[i] === 1;
-      const shouldHighlight = isInverted ? !isSelected : isSelected;
+      const rawVal = mask[i];
+      if (rawVal === 0 && !isInverted) continue;
 
-      if (shouldHighlight) {
+      const w = rawVal / 255;
+      const shouldHighlight = isInverted ? 1 - w : w;
+
+      if (shouldHighlight > 0.02) {
         const idx = i * 4;
         data[idx] = 99; // Indigo/Purple tint
         data[idx + 1] = 102;
         data[idx + 2] = 241;
-        data[idx + 3] = 90; // Alpha
+        data[idx + 3] = Math.round(95 * Math.min(1, shouldHighlight)); // Alpha dynamically matches feather softness
       }
     }
 
@@ -743,6 +746,17 @@ export const SelectionOverlay: React.FC<SelectionOverlayProps> = ({
             <span className="hidden sm:inline">Grid</span>
           </button>
         )}
+
+        {/* Feather Softness Badge (if active feathering > 0) */}
+        {toolMode === 'wand' && activeSelection?.feather && activeSelection.feather > 0 ? (
+          <span
+            className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-mono font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+            title={`Active Feather Softness: ${activeSelection.feather}px`}
+          >
+            <span>Feather:</span>
+            <span>{activeSelection.feather}px</span>
+          </span>
+        ) : null}
 
         <div className="h-4 w-px bg-slate-800 mx-0.5" />
 

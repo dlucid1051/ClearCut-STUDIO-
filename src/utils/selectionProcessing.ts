@@ -8,7 +8,7 @@
 export type SelectionShapeType = 'rect' | 'circle' | 'star' | 'diamond';
 
 export interface SelectionData {
-  mask: Uint8Array; // 1 if pixel is selected, 0 otherwise. Length = width * height
+  mask: Uint8Array; // 0..255 selection weight (alpha) for each pixel. Length = width * height
   width: number;
   height: number;
   bounds: {
@@ -18,6 +18,74 @@ export interface SelectionData {
     maxY: number;
   };
   pixelCount: number;
+  feather?: number; // Feather radius in pixels (0 = crisp)
+  rawMask?: Uint8Array; // Original unfeathered binary mask for fast dynamic re-feathering
+}
+
+/**
+ * Applies directional anti-aliased feathering to an unfeathered binary selection mask.
+ * Output mask has values 0..255 representing pixel selection weight.
+ * Maintains a solid 100% core for selected pixels to eliminate residual background ghosting / halos,
+ * while smoothly rolling off edge transparency over the feather radius.
+ */
+export function featherMask(
+  rawBinaryMask: Uint8Array,
+  width: number,
+  height: number,
+  featherRadius: number
+): Uint8Array {
+  const total = width * height;
+  if (featherRadius <= 0) {
+    const result = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+      result[i] = rawBinaryMask[i] > 0 ? 255 : 0;
+    }
+    return result;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return rawBinaryMask;
+
+  const imgData = ctx.createImageData(width, height);
+  const data = imgData.data;
+  for (let i = 0; i < total; i++) {
+    if (rawBinaryMask[i] > 0) {
+      const idx = i * 4;
+      data[idx] = 255;
+      data[idx + 1] = 255;
+      data[idx + 2] = 255;
+      data[idx + 3] = 255;
+    }
+  }
+
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = width;
+  srcCanvas.height = height;
+  const srcCtx = srcCanvas.getContext('2d');
+  if (!srcCtx) return rawBinaryMask;
+  srcCtx.putImageData(imgData, 0, 0);
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.filter = `blur(${featherRadius}px)`;
+  ctx.drawImage(srcCanvas, 0, 0);
+
+  const blurredData = ctx.getImageData(0, 0, width, height).data;
+  const feathered = new Uint8Array(total);
+  for (let i = 0; i < total; i++) {
+    if (rawBinaryMask[i] > 0) {
+      // Solid core: 100% selected so no background ghosting remains
+      feathered[i] = 255;
+    } else {
+      // Smooth gradient roll-off from 255 at the border down to 0 over the feather radius
+      const blurAlpha = blurredData[i * 4 + 3];
+      feathered[i] = Math.min(255, Math.round(blurAlpha * 2));
+    }
+  }
+
+  return feathered;
 }
 
 export interface ShapeRect {
@@ -72,7 +140,7 @@ export function floodFillSelection(
 
   const startPixel = clampY * width + clampX;
   visited[startPixel] = 1;
-  mask[startPixel] = 1;
+  mask[startPixel] = 255;
   queue[queueTail++] = startPixel;
 
   let minX = clampX;
@@ -118,7 +186,7 @@ export function floodFillSelection(
       const distSq = dr * dr + dg * dg + db * db + da * da;
 
       if (distSq <= maxDistSq) {
-        mask[nIdx] = 1;
+        mask[nIdx] = 255;
         pixelCount++;
         queue[queueTail++] = nIdx;
       }
@@ -244,7 +312,7 @@ export function rasterizeShapeSelection(
 
     for (let i = 0; i < totalPixels; i++) {
       if (data[i * 4 + 3] > 128) {
-        mask[i] = 1;
+        mask[i] = 255;
         pixelCount++;
       }
     }
@@ -266,6 +334,7 @@ export function rasterizeShapeSelection(
 
 /**
  * Erases selected pixels (or inverted selection) to transparent on a cloned canvas.
+ * Supports smooth feathered alpha attenuation when mask contains values between 0 and 255.
  */
 export function applyDeleteSelection(
   sourceCanvas: HTMLCanvasElement,
@@ -287,15 +356,21 @@ export function applyDeleteSelection(
   const total = result.width * result.height;
 
   for (let i = 0; i < total; i++) {
-    const isSelected = mask[i] === 1;
-    const shouldErase = isInverted ? !isSelected : isSelected;
+    const rawVal = mask[i];
+    const w = rawVal / 255;
+    const shouldEraseWeight = isInverted ? 1 - w : w;
 
-    if (shouldErase) {
+    if (shouldEraseWeight > 0) {
       const idx = i * 4;
-      data[idx] = 0;
-      data[idx + 1] = 0;
-      data[idx + 2] = 0;
-      data[idx + 3] = 0; // transparent
+      const remainingAlpha = 1 - shouldEraseWeight;
+      if (remainingAlpha <= 0) {
+        data[idx] = 0;
+        data[idx + 1] = 0;
+        data[idx + 2] = 0;
+        data[idx + 3] = 0; // transparent
+      } else {
+        data[idx + 3] = Math.round(data[idx + 3] * remainingAlpha);
+      }
     }
   }
 
@@ -429,12 +504,15 @@ export function extractSelectionCanvas(options: ExtractSelectionOptions): HTMLCa
     for (let cx = 0; cx < cropWidth; cx++) {
       const imgX = minX + cx;
       const maskIdx = maskRowOffset + imgX;
-      const isSelected = maskIdx >= 0 && maskIdx < mask.length && mask[maskIdx] === 1;
-      const keep = isInverted ? !isSelected : isSelected;
+      const rawVal = maskIdx >= 0 && maskIdx < mask.length ? mask[maskIdx] : 0;
+      const w = rawVal / 255;
+      const keepWeight = isInverted ? 1 - w : w;
 
-      if (!keep) {
-        const pixelIdx = (rowOffset + cx) * 4;
+      const pixelIdx = (rowOffset + cx) * 4;
+      if (keepWeight <= 0) {
         data[pixelIdx + 3] = 0; // alpha = 0 (transparent)
+      } else if (keepWeight < 1) {
+        data[pixelIdx + 3] = Math.round(data[pixelIdx + 3] * keepWeight);
       }
     }
   }

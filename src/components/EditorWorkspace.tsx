@@ -51,6 +51,7 @@ import {
   ShapeRect,
   SelectionData,
   floodFillSelection,
+  featherMask,
   rasterizeShapeSelection,
   applyDeleteSelection,
   extractSelectionCanvas,
@@ -147,12 +148,16 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       setHistoryIndex(0);
       setZoomLevel(1);
       setPanOffset({ x: 0, y: 0 });
+      setActiveSelection(null);
+      lastWandSeedRef.current = null;
+      rawWandMaskRef.current = null;
     }
   }, [initialCutoutCanvas, originalImage]);
 
   // Mask Refinement bump-out tool state (Off, Eraser, Restore Brush)
   const [toolMode, setToolMode] = useState<MaskToolMode>('off');
   const [brushSize, setBrushSize] = useState<number>(28);
+  const [brushHardness, setBrushHardness] = useState<number>(100);
   const [cursorPos, setCursorPos] = useState<{
     canvasX: number;
     canvasY: number;
@@ -166,6 +171,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   // Right Edge Selection Bump tool state (Off, Magic Wand, Shape Selection)
   const [selectionToolMode, setSelectionToolMode] = useState<SelectionToolMode>('off');
   const [wandTolerance, setWandTolerance] = useState<number>(32);
+  const [wandFeather, setWandFeather] = useState<number>(0);
+  const lastWandSeedRef = useRef<{ x: number; y: number } | null>(null);
+  const rawWandMaskRef = useRef<Uint8Array | null>(null);
   const [activeSelectionShape, setActiveSelectionShape] = useState<SelectionShapeType>('rect');
   const [shapeRect, setShapeRect] = useState<ShapeRect>(() => {
     const initW = Math.min(600, Math.round((currentCanvas.width || 800) * 0.5));
@@ -764,6 +772,57 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     setShowResizeModal(false);
   };
 
+  // Dynamic 2D Magic Wand adjustments (Tolerance + Feather)
+  const handleWandToleranceChange = useCallback(
+    (newTol: number) => {
+      setWandTolerance(newTol);
+      if (selectionToolMode === 'wand' && lastWandSeedRef.current && currentCanvas) {
+        const rawSel = floodFillSelection(
+          currentCanvas,
+          lastWandSeedRef.current.x,
+          lastWandSeedRef.current.y,
+          newTol
+        );
+        if (rawSel) {
+          rawWandMaskRef.current = rawSel.mask;
+          const featheredMask =
+            wandFeather > 0
+              ? featherMask(rawSel.mask, rawSel.width, rawSel.height, wandFeather)
+              : rawSel.mask;
+          setActiveSelection({
+            ...rawSel,
+            mask: featheredMask,
+            feather: wandFeather,
+            rawMask: rawSel.mask,
+          });
+        }
+      }
+    },
+    [selectionToolMode, currentCanvas, wandFeather]
+  );
+
+  const handleWandFeatherChange = useCallback(
+    (newFeather: number) => {
+      setWandFeather(newFeather);
+      if (selectionToolMode === 'wand' && activeSelection && rawWandMaskRef.current) {
+        const featheredMask =
+          newFeather > 0
+            ? featherMask(rawWandMaskRef.current, activeSelection.width, activeSelection.height, newFeather)
+            : rawWandMaskRef.current;
+        setActiveSelection((prev) =>
+          prev
+            ? {
+                ...prev,
+                mask: featheredMask,
+                feather: newFeather,
+              }
+            : null
+        );
+      }
+    },
+    [selectionToolMode, activeSelection]
+  );
+
   // Selection actions: Delete, Invert, Deselect
   const handleDeleteSelection = useCallback(() => {
     let maskToUse: Uint8Array | null = null;
@@ -787,6 +846,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     showToast('Pixels Deleted', 'Selected area cleared to transparent. Undo anytime.', 'success');
     if (selectionToolMode === 'wand') {
       setActiveSelection(null);
+      lastWandSeedRef.current = null;
+      rawWandMaskRef.current = null;
     }
   }, [selectionToolMode, currentCanvas, activeSelectionShape, shapeRect, activeSelection, isSelectionInverted, pushNewState, showToast]);
 
@@ -798,6 +859,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   const handleDeselectSelection = useCallback(() => {
     setActiveSelection(null);
     setIsSelectionInverted(false);
+    lastWandSeedRef.current = null;
+    rawWandMaskRef.current = null;
     setSelectionToolMode('off');
     triggerHaptic('tap');
   }, []);
@@ -849,13 +912,27 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
     // Magic wand click: flood fill from clicked pixel
     if (selectionToolMode === 'wand') {
-      const sel = floodFillSelection(currentCanvas, coords.canvasX, coords.canvasY, wandTolerance);
-      if (sel) {
+      const rawSel = floodFillSelection(currentCanvas, coords.canvasX, coords.canvasY, wandTolerance);
+      if (rawSel) {
+        lastWandSeedRef.current = { x: coords.canvasX, y: coords.canvasY };
+        rawWandMaskRef.current = rawSel.mask;
+        const featheredMask =
+          wandFeather > 0
+            ? featherMask(rawSel.mask, rawSel.width, rawSel.height, wandFeather)
+            : rawSel.mask;
+
+        const sel: SelectionData = {
+          ...rawSel,
+          mask: featheredMask,
+          feather: wandFeather,
+          rawMask: rawSel.mask,
+        };
+
         setActiveSelection(sel);
         triggerHaptic('light');
         showToast(
           'Area Selected',
-          `${sel.pixelCount.toLocaleString()} pixels selected (${wandTolerance}% tolerance).`,
+          `${sel.pixelCount.toLocaleString()} pixels selected (${wandTolerance}% tolerance${wandFeather > 0 ? `, ${wandFeather}px feather` : ''}).`,
           'success',
           1800
         );
@@ -875,8 +952,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     const pCtx = previewCanvasRef.current?.getContext('2d');
 
     if (toolMode === 'eraser' && cCtx && pCtx) {
-      applyEraserStroke(cCtx, pt, pt, brushSize);
-      applyEraserStroke(pCtx, pt, pt, brushSize);
+      applyEraserStroke(cCtx, pt, pt, brushSize, brushHardness, currentCanvas.width, currentCanvas.height);
+      applyEraserStroke(pCtx, pt, pt, brushSize, brushHardness, currentCanvas.width, currentCanvas.height);
     } else if (toolMode === 'brush' && cCtx && pCtx) {
       applyRestoreStroke(
         cCtx,
@@ -885,7 +962,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         pt,
         brushSize,
         currentCanvas.width,
-        currentCanvas.height
+        currentCanvas.height,
+        brushHardness
       );
       applyRestoreStroke(
         pCtx,
@@ -894,7 +972,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         pt,
         brushSize,
         currentCanvas.width,
-        currentCanvas.height
+        currentCanvas.height,
+        brushHardness
       );
     }
   };
@@ -929,8 +1008,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     const pCtx = previewCanvasRef.current?.getContext('2d');
 
     if (toolMode === 'eraser' && cCtx && pCtx) {
-      applyEraserStroke(cCtx, prevPt, currPt, brushSize);
-      applyEraserStroke(pCtx, prevPt, currPt, brushSize);
+      applyEraserStroke(cCtx, prevPt, currPt, brushSize, brushHardness, currentCanvas.width, currentCanvas.height);
+      applyEraserStroke(pCtx, prevPt, currPt, brushSize, brushHardness, currentCanvas.width, currentCanvas.height);
     } else if (toolMode === 'brush' && cCtx && pCtx) {
       applyRestoreStroke(
         cCtx,
@@ -939,7 +1018,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         currPt,
         brushSize,
         currentCanvas.width,
-        currentCanvas.height
+        currentCanvas.height,
+        brushHardness
       );
       applyRestoreStroke(
         pCtx,
@@ -948,7 +1028,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         currPt,
         brushSize,
         currentCanvas.width,
-        currentCanvas.height
+        currentCanvas.height,
+        brushHardness
       );
     }
   };
@@ -1139,6 +1220,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             }}
             brushSize={brushSize}
             onChangeBrushSize={setBrushSize}
+            brushHardness={brushHardness}
+            onChangeBrushHardness={setBrushHardness}
           />
 
           {/* Mirrored Selection Bump docked along the right edge for Off, Magic Wand, and Shape Selection */}
@@ -1163,10 +1246,14 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               } else {
                 setActiveSelection(null);
                 setIsSelectionInverted(false);
+                lastWandSeedRef.current = null;
+                rawWandMaskRef.current = null;
               }
             }}
             tolerance={wandTolerance}
-            onChangeTolerance={setWandTolerance}
+            onChangeTolerance={handleWandToleranceChange}
+            feather={wandFeather}
+            onChangeFeather={handleWandFeatherChange}
             activeShape={activeSelectionShape}
             onChangeShape={setActiveSelectionShape}
           />
@@ -1229,7 +1316,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             <span className="text-slate-100">{currentBgInfo.label}</span>
           </button>
 
-          {/* Circular Brush Reticle Indicator */}
+          {/* Circular Brush Reticle Indicator with dynamic hardness display */}
           {toolMode !== 'off' && cursorPos !== null && (
             <div
               className={`pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 z-20 flex items-center justify-center transition-[width,height] duration-75 ${
@@ -1242,8 +1329,23 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
                 top: `${cursorPos.viewportY}px`,
                 width: `${cursorPos.displayDiameter}px`,
                 height: `${cursorPos.displayDiameter}px`,
+                borderStyle: brushHardness < 98 ? 'dashed' : 'solid',
+                boxShadow:
+                  brushHardness < 98
+                    ? `0 0 ${Math.round(((100 - brushHardness) / 100) * 12)}px currentColor`
+                    : undefined,
               }}
             >
+              {/* Inner solid core boundary if softened */}
+              {brushHardness < 98 && (
+                <div
+                  className="rounded-full border border-white/60 pointer-events-none absolute"
+                  style={{
+                    width: `${Math.max(4, Math.round(cursorPos.displayDiameter * (brushHardness / 100)))}px`,
+                    height: `${Math.max(4, Math.round(cursorPos.displayDiameter * (brushHardness / 100)))}px`,
+                  }}
+                />
+              )}
               <div
                 className={`w-1 h-1 rounded-full ${
                   toolMode === 'eraser' ? 'bg-rose-300' : 'bg-emerald-300'

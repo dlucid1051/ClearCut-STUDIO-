@@ -19,6 +19,8 @@ interface RightSelectionBumpProps {
   onChangeToolMode: (mode: SelectionToolMode) => void;
   tolerance: number; // 5 to 100
   onChangeTolerance: (tolerance: number) => void;
+  feather?: number; // 0 to 20 px
+  onChangeFeather?: (feather: number) => void;
   activeShape: SelectionShapeType;
   onChangeShape: (shape: SelectionShapeType) => void;
 }
@@ -35,6 +37,8 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
   onChangeToolMode,
   tolerance,
   onChangeTolerance,
+  feather = 0,
+  onChangeFeather,
   activeShape,
   onChangeShape,
 }) => {
@@ -48,16 +52,22 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
   const startYRef = useRef<number>(0);
   const startXRef = useRef<number>(0);
   const startValRef = useRef<number>(tolerance);
+  const startFeatherRef = useRef<number>(feather);
   const startTimeRef = useRef<number>(0);
   const hasDraggedRef = useRef<boolean>(false);
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentToleranceRef = useRef<number>(tolerance);
+  const currentFeatherRef = useRef<number>(feather);
   const currentShapeRef = useRef<SelectionShapeType>(activeShape);
   const shapeDragAccRef = useRef<number>(0);
 
   useEffect(() => {
     currentToleranceRef.current = tolerance;
   }, [tolerance]);
+
+  useEffect(() => {
+    currentFeatherRef.current = feather;
+  }, [feather]);
 
   useEffect(() => {
     currentShapeRef.current = activeShape;
@@ -90,6 +100,7 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
     startXRef.current = e.clientX;
     startYRef.current = e.clientY;
     startValRef.current = currentToleranceRef.current;
+    startFeatherRef.current = currentFeatherRef.current;
     startTimeRef.current = Date.now();
     hasDraggedRef.current = false;
     shapeDragAccRef.current = 0;
@@ -108,24 +119,41 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
     if (!isPointerDownRef.current) return;
     e.preventDefault();
 
-    const deltaY = startYRef.current - e.clientY; // Upward is positive
+    const deltaY = startYRef.current - e.clientY; // Upward is positive -> Tolerance
+    const deltaX = startXRef.current - e.clientX; // Leftward (pulling into screen) is positive -> Feather
     const dist = Math.hypot(e.clientX - startXRef.current, e.clientY - startYRef.current);
 
-    if (dist > 3 || Math.abs(deltaY) > 2) {
+    if (dist > 3 || Math.abs(deltaY) > 2 || Math.abs(deltaX) > 2) {
       if (!hasDraggedRef.current) {
         hasDraggedRef.current = true;
         setIsDragging(true);
       }
 
       if (toolMode === 'wand') {
-        // Drag to adjust tolerance
-        const sensitivity = 0.55;
-        const computed = Math.max(
+        // 1. Vertical drag (Y-axis): Tolerance (5 to 100)
+        const sensitivityY = 0.55;
+        const computedTol = Math.max(
           5,
-          Math.min(100, Math.round(startValRef.current + deltaY * sensitivity))
+          Math.min(100, Math.round(startValRef.current + deltaY * sensitivityY))
         );
-        if (computed !== currentToleranceRef.current) {
-          onChangeTolerance(computed);
+        if (computedTol !== currentToleranceRef.current) {
+          onChangeTolerance(computedTol);
+        }
+
+        // 2. Horizontal drag (X-axis): Feather (0 to 20 px)
+        if (onChangeFeather) {
+          const absDeltaX = Math.abs(deltaX);
+          if (absDeltaX > 5) {
+            const effectiveDeltaX = (absDeltaX - 5) * Math.sign(deltaX);
+            const sensitivityX = 0.12; // ~8px of drag per 1px feather
+            const computedFeather = Math.max(
+              0,
+              Math.min(20, Math.round(startFeatherRef.current + effectiveDeltaX * sensitivityX))
+            );
+            if (computedFeather !== currentFeatherRef.current) {
+              onChangeFeather(computedFeather);
+            }
+          }
         }
       } else if (toolMode === 'shape') {
         // Drag to cycle shapes
@@ -219,6 +247,18 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
         onChangeShape(SHAPES[nextIdx].type);
         triggerHaptic('selection');
       }
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (toolMode === 'wand' && onChangeFeather) {
+        onChangeFeather(Math.min(20, feather + 1));
+        triggerHaptic('light');
+      }
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (toolMode === 'wand' && onChangeFeather) {
+        onChangeFeather(Math.max(0, feather - 1));
+        triggerHaptic('light');
+      }
     }
   };
 
@@ -254,7 +294,7 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
           bumpClasses:
             'bg-slate-800/90 hover:bg-slate-700/90 text-slate-300 hover:text-white border-slate-700/80 shadow-black/40 shadow-md',
           badgeClasses: 'text-slate-400 border-slate-600 bg-slate-800/60',
-          icon: <MousePointer className="w-5 h-5" />,
+          icon: <MousePointer className="w-5 h-5 -scale-x-100" />,
           accentColor: 'slate',
         };
     }
@@ -275,35 +315,55 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
       {showCallout && (
         <div
           className="mr-3 pointer-events-none flex items-center gap-3.5 bg-slate-900/95 border border-slate-700/80 px-4 py-2.5 rounded-2xl shadow-2xl backdrop-blur-md z-40 animate-in fade-in zoom-in-95 duration-100 relative"
-          style={{ minWidth: '190px' }}
+          style={{ minWidth: toolMode === 'wand' ? '225px' : '190px' }}
         >
           {/* Triangular Flag Tip pointing right to the bump */}
           <div className="absolute -right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 rotate-45 bg-slate-900 border-r border-t border-slate-700/80" />
 
           {/* Left Column: Details */}
           <div className="flex flex-col">
-            <div className="flex items-center gap-1.5 mb-0.5">
+            <div className="flex items-center gap-1.5 mb-1">
               <span
                 className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded border ${meta.badgeClasses}`}
               >
-                {toolMode === 'wand' ? 'Magic Wand' : 'Shape Select'}
+                {toolMode === 'wand' ? 'Magic Wand 2D' : 'Shape Select'}
               </span>
             </div>
 
             {toolMode === 'wand' ? (
               <>
-                <div className="flex items-baseline gap-1">
-                  <span className="font-mono text-2xl font-black text-white tracking-tight">
-                    {tolerance}
-                  </span>
-                  <span className="font-mono text-xs text-indigo-400 font-semibold">tol</span>
-                </div>
-                <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-0.5 font-medium">
-                  <div className="flex flex-col -space-y-1">
-                    <ChevronUp className="w-2.5 h-2.5 text-slate-400" />
-                    <ChevronDown className="w-2.5 h-2.5 text-slate-400" />
+                <div className="flex items-center gap-3">
+                  {/* Tolerance Indicator */}
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">↕ Tol</span>
+                    <div className="flex items-baseline gap-0.5">
+                      <span className="font-mono text-xl font-black text-white tracking-tight">
+                        {tolerance}
+                      </span>
+                      <span className="font-mono text-[10px] text-indigo-400 font-semibold">%</span>
+                    </div>
                   </div>
-                  <span>Drag to adjust sensitivity</span>
+
+                  <div className="h-6 w-px bg-slate-800" />
+
+                  {/* Feather Indicator */}
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">⟵ Feather</span>
+                    <div className="flex items-baseline gap-0.5">
+                      <span className="font-mono text-xl font-black text-white tracking-tight">
+                        {feather}
+                      </span>
+                      <span className="font-mono text-[10px] text-cyan-400 font-semibold">px</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1 font-medium">
+                  <span className="text-indigo-400 font-bold">↕ Drag:</span>
+                  <span>Tol</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-cyan-400 font-bold">⟵ Drag:</span>
+                  <span>Feather</span>
                 </div>
               </>
             ) : (
@@ -324,14 +384,16 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
             )}
           </div>
 
-          {/* Right Column: Shape or Tolerance Visualizer */}
+          {/* Right Column: Shape or Tolerance + Feather Visualizer */}
           <div className="w-14 h-14 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-center shrink-0 relative overflow-hidden shadow-inner">
             {toolMode === 'wand' ? (
               <div
                 className="rounded-full border-2 border-indigo-400 bg-indigo-500/30 flex items-center justify-center transition-all duration-75"
                 style={{
-                  width: `${Math.max(10, Math.min(46, Math.round((tolerance / 100) * 46)))}px`,
-                  height: `${Math.max(10, Math.min(46, Math.round((tolerance / 100) * 46)))}px`,
+                  width: `${Math.max(10, Math.min(44, Math.round((tolerance / 100) * 44)))}px`,
+                  height: `${Math.max(10, Math.min(44, Math.round((tolerance / 100) * 44)))}px`,
+                  boxShadow: feather > 0 ? `0 0 ${feather * 1.5}px rgba(99, 102, 241, 0.85)` : 'none',
+                  filter: feather > 0 ? `blur(${Math.min(3.5, feather * 0.25)}px)` : 'none',
                 }}
               >
                 <div className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
@@ -354,7 +416,7 @@ export const RightSelectionBump: React.FC<RightSelectionBumpProps> = ({
           <span className="text-white font-semibold mr-1.5">{meta.label}:</span>
           <span>
             {toolMode === 'wand'
-              ? 'Click to toggle • Drag ↕ for tolerance'
+              ? 'Click to toggle • Drag ↕ for tolerance • Drag ⟵ for feather'
               : toolMode === 'shape'
               ? 'Click to toggle • Drag ↕ for shapes'
               : 'Click to select (Wand / Shape)'}
