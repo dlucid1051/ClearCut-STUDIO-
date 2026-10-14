@@ -1,0 +1,6 @@
+{
+  "summary": "Architectural plan for implementing a non-destructive image background layer system. Distinguishes viewport inspection grids from image compositing, automatically expands canvas to match imported backdrop dimensions, and ensures all file exports (PNG, WebP, JPEG, ICO) and camera screenshots burn the composite accurately.",
+  "updatedAt": "2026-10-13T21:38:36.934803308Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

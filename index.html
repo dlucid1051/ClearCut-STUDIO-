@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>ClearCut STUDIO - Offline Background Remover & Icon Studio</title>
+    <meta name="description" content="Strip image backgrounds locally in your browser with AI. Crop, resize, touch up, export in any format (PNG, WebP, JPG, ICO), and work 100% offline." />
+    <meta property="og:title" content="ClearCut STUDIO - Offline Background Remover & Icon Studio" />
+    <meta property="og:description" content="Strip image backgrounds locally in your browser with AI. Crop, resize, touch up, export in any format (PNG, WebP, JPG, ICO), and work 100% offline." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ClearCut STUDIO" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <script>
+      // Gracefully shim Vite HMR WebSocket since HMR is disabled in AI Studio preview environment
+      (function () {
+        const OriginalWebSocket = window.WebSocket;
+        if (OriginalWebSocket) {
+          class ViteMockWebSocket extends EventTarget {
+            constructor(url, protocols) {
+              super();
+              this.url = url;
+              this.protocols = protocols;
+              this.readyState = 1; // WebSocket.OPEN
+              this.bufferedAmount = 0;
+              this.extensions = '';
+              this.protocol = Array.isArray(protocols) ? protocols[0] || '' : protocols || '';
+              this.binaryType = 'blob';
+              setTimeout(() => {
+                const openEvent = new Event('open');
+                this.dispatchEvent(openEvent);
+                if (typeof this.onopen === 'function') {
+                  this.onopen(openEvent);
+                }
+              }, 0);
+            }
+            send() {}
+            close() {
+              this.readyState = 3; // WebSocket.CLOSED
+              const closeEvent = new CloseEvent('close', { wasClean: true, code: 1000, reason: 'Normal Closure' });
+              this.dispatchEvent(closeEvent);
+              if (typeof this.onclose === 'function') {
+                this.onclose(closeEvent);
+              }
+            }
+          }
+          ViteMockWebSocket.CONNECTING = 0;
+          ViteMockWebSocket.OPEN = 1;
+          ViteMockWebSocket.CLOSING = 2;
+          ViteMockWebSocket.CLOSED = 3;
+
+          const PatchedWebSocket = function (url, protocols) {
+            const isViteHmr =
+              protocols === 'vite-hmr' ||
+              (Array.isArray(protocols) && protocols.includes('vite-hmr')) ||
+              (typeof url === 'string' && (url.includes('@vite') || url.includes('vite-hmr')));
+
+            if (isViteHmr) {
+              return new ViteMockWebSocket(url, protocols);
+            }
+            return new OriginalWebSocket(url, protocols);
+          };
+
+          PatchedWebSocket.CONNECTING = 0;
+          PatchedWebSocket.OPEN = 1;
+          PatchedWebSocket.CLOSING = 2;
+          PatchedWebSocket.CLOSED = 3;
+          PatchedWebSocket.prototype = OriginalWebSocket.prototype;
+          window.WebSocket = PatchedWebSocket;
+        }
+
+        const originalConsoleError = console.error;
+        console.error = function (...args) {
+          const str = args
+            .map((a) => (a && (a.message || a.stack || (typeof a === 'object' ? JSON.stringify(a) : String(a)))) || '')
+            .join(' ');
+          if (
+            str.includes('WebSocket') ||
+            str.includes('[vite]') ||
+            str.includes('@vite/client') ||
+            str.includes('closed without opened')
+          ) {
+            return;
+          }
+          originalConsoleError.apply(console, args);
+        };
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            const msg = event?.message || event?.error?.message || '';
+            const filename = event?.filename || '';
+            if (
+              msg.includes('WebSocket') ||
+              msg.includes('[vite]') ||
+              msg.includes('closed without opened') ||
+              filename.includes('@vite/client')
+            ) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+              return true;
+            }
+          },
+          true
+        );
+
+        window.addEventListener(
+          'unhandledrejection',
+          function (event) {
+            const reason = event?.reason?.message || String(event?.reason || '');
+            if (
+              reason.includes('WebSocket') ||
+              reason.includes('[vite]') ||
+              reason.includes('closed without opened')
+            ) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+      })();
+    </script>
+  </head>
+  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,6 @@
+{
+  "name": "ClearCut PWA - Offline Background Remover & Icon Studio",
+  "description": "Strip image backgrounds locally in your browser with AI. Crop, resize, touch up, export in any format (PNG, WebP, JPG, ICO), and work 100% offline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
