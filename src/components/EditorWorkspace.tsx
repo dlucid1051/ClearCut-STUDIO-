@@ -1,3 +1,8 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Download,
@@ -21,7 +26,6 @@ import {
   AlertCircle,
   Camera,
   Film,
-  Palette,
 } from 'lucide-react';
 import {
   CropRect,
@@ -39,14 +43,6 @@ import { CropOverlay } from './CropOverlay';
 import { ResizeModal } from './ResizeModal';
 import { SaveAsModal } from './SaveAsModal';
 import { SpriteSlideshowModal } from './SpriteSlideshowModal';
-import { BackgroundModal } from './BackgroundModal';
-import { BackgroundShelf } from './BackgroundShelf';
-import {
-  ImageBackgroundState,
-  DEFAULT_IMAGE_BG_STATE,
-  ViewportGridMode,
-} from '../types/background';
-import { createCompositeCanvas } from '../utils/compositing';
 import { BumpOutToolbar, MaskToolMode } from './BumpOutToolbar';
 import { RightSelectionBump, SelectionToolMode } from './RightSelectionBump';
 import { SelectionOverlay } from './SelectionOverlay';
@@ -90,7 +86,8 @@ interface EditorWorkspaceProps {
   onOpenImageClick?: () => void;
 }
 
-type ActiveTab = 'crop' | 'resize' | 'backdrop' | 'transform';
+type BackgroundMode = 'checker-dark' | 'checker-light' | 'white' | 'dark' | 'custom' | 'split';
+type ActiveTab = 'crop' | 'resize' | 'transform';
 
 interface HistoryItem {
   cutout: HTMLCanvasElement;
@@ -183,23 +180,12 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   const [activeSelection, setActiveSelection] = useState<SelectionData | null>(null);
   const [isSelectionInverted, setIsSelectionInverted] = useState<boolean>(false);
 
-  // Non-destructive Image Background Layer state (attached to artwork)
-  const [imageBgState, setImageBgState] = useState<ImageBackgroundState>(DEFAULT_IMAGE_BG_STATE);
-  const [showBgModal, setShowBgModal] = useState<boolean>(false);
-
-  // Viewport Floor / Inspection Grid state (independent of image pixels)
-  const [viewportGridMode, setViewportGridMode] = useState<ViewportGridMode>('checker-dark');
+  // Background and Preview settings
+  const [bgMode, setBgMode] = useState<BackgroundMode>('checker-dark');
+  const [customBgColor, setCustomBgColor] = useState<string>('#3b82f6');
   const [splitPos, setSplitPos] = useState<number>(50); // percentage 0 to 100
   const [zoomLevel, setZoomLevel] = useState<number>(1); // 0.25 to 5.0
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-
-  // Compute live composite canvas combining transparent cutout with non-destructive background layer
-  const compositeCanvas = useMemo(() => {
-    return createCompositeCanvas(currentCanvas, imageBgState);
-  }, [currentCanvas, imageBgState]);
-
-  const effectiveWidth = compositeCanvas.width;
-  const effectiveHeight = compositeCanvas.height;
 
   // Notifications
   const [toastNotification, setToastNotification] = useState<{
@@ -417,19 +403,22 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     setTimeout(() => setIsShutterFlashing(false), 220);
 
     try {
-      const sourceImg = isComparing && previewCanvasRef.current ? previewCanvasRef.current : compositeCanvas;
+      const sourceImg =
+        bgMode === 'split' && previewCanvasRef.current ? previewCanvasRef.current : currentCanvas;
       let captureCanvas: HTMLCanvasElement | null = null;
       let isSelectionScreenshot = false;
-      let captureWidth = sourceImg.width;
-      let captureHeight = sourceImg.height;
+      let captureWidth = currentCanvas.width;
+      let captureHeight = currentCanvas.height;
 
       if (activeSelectionDetails) {
-        // Capture active selection area only from the composite image
+        // Capture active selection area only
         captureCanvas = extractSelectionCanvas({
           sourceCanvas: sourceImg,
           mask: activeSelectionDetails.mask,
           bounds: activeSelectionDetails.bounds,
           isInverted: activeSelectionDetails.isInverted,
+          bgMode,
+          customBgColor,
         });
 
         if (captureCanvas) {
@@ -440,8 +429,26 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       }
 
       if (!captureCanvas) {
-        // Full image screenshot uses compositeCanvas directly
-        captureCanvas = cloneCanvas(sourceImg);
+        // Build full image screenshot canvas matching active background and composition
+        captureCanvas = document.createElement('canvas');
+        captureCanvas.width = currentCanvas.width;
+        captureCanvas.height = currentCanvas.height;
+        const ctx = captureCanvas.getContext('2d');
+        if (!ctx) throw new Error('Canvas context unavailable');
+
+        // If background mode is non-transparent solid color, fill background
+        if (bgMode === 'white') {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, captureCanvas.width, captureCanvas.height);
+        } else if (bgMode === 'dark') {
+          ctx.fillStyle = '#020617';
+          ctx.fillRect(0, 0, captureCanvas.width, captureCanvas.height);
+        } else if (bgMode === 'custom') {
+          ctx.fillStyle = customBgColor;
+          ctx.fillRect(0, 0, captureCanvas.width, captureCanvas.height);
+        }
+
+        ctx.drawImage(sourceImg, 0, 0);
       }
 
       const pngBlob = await canvasToPngBlob(captureCanvas);
@@ -476,7 +483,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       triggerHaptic('error');
       showToast('Capture Failed', 'Could not generate screenshot of image.', 'error');
     }
-  }, [hasImage, compositeCanvas, isComparing, originalFilename, activeSelectionDetails, showToast]);
+  }, [hasImage, currentCanvas, bgMode, customBgColor, originalFilename, activeSelectionDetails, showToast]);
 
   // Update history when canvas changes (preserves both cutout and original canvases)
   const pushNewState = useCallback(
@@ -547,6 +554,16 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     }
   }, [registerRemoveBgTrigger, handleTriggerRemoveBackground]);
 
+  // Synchronize compare state from header title bar button with local viewport bgMode
+  useEffect(() => {
+    if (isComparing !== undefined) {
+      if (isComparing && bgMode !== 'split') {
+        setBgMode('split');
+      } else if (!isComparing && bgMode === 'split') {
+        setBgMode('checker-dark');
+      }
+    }
+  }, [isComparing]);
 
 
 
@@ -677,17 +694,19 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     };
   }, [zoomLevel, panOffset]);
 
-  // Draw current composite image onto the preview canvas
+  // Draw current image onto the preview canvas
   useEffect(() => {
     const preview = previewCanvasRef.current;
-    if (!preview || !hasImage) return;
+    if (!preview) return;
 
-    if (isComparing) {
-      preview.width = currentCanvas.width;
-      preview.height = currentCanvas.height;
-      const ctx = preview.getContext('2d');
-      if (!ctx) return;
+    preview.width = currentCanvas.width;
+    preview.height = currentCanvas.height;
+    const ctx = preview.getContext('2d');
+    if (!ctx) return;
 
+    ctx.clearRect(0, 0, preview.width, preview.height);
+
+    if (bgMode === 'split') {
       const splitPx = (preview.width * splitPos) / 100;
 
       // Draw original on left
@@ -698,12 +717,12 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       ctx.drawImage(currentOriginalCanvas, 0, 0, preview.width, preview.height);
       ctx.restore();
 
-      // Draw composite on right
+      // Draw cutout on right
       ctx.save();
       ctx.beginPath();
       ctx.rect(splitPx, 0, preview.width - splitPx, preview.height);
       ctx.clip();
-      ctx.drawImage(compositeCanvas, 0, 0);
+      ctx.drawImage(currentCanvas, 0, 0);
       ctx.restore();
 
       // Draw divider line
@@ -714,15 +733,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       ctx.lineTo(splitPx, preview.height);
       ctx.stroke();
     } else {
-      preview.width = compositeCanvas.width;
-      preview.height = compositeCanvas.height;
-      const ctx = preview.getContext('2d');
-      if (!ctx) return;
-
-      ctx.clearRect(0, 0, preview.width, preview.height);
-      ctx.drawImage(compositeCanvas, 0, 0);
+      ctx.drawImage(currentCanvas, 0, 0);
     }
-  }, [hasImage, currentCanvas, compositeCanvas, isComparing, splitPos, currentOriginalCanvas]);
+  }, [currentCanvas, bgMode, splitPos, currentOriginalCanvas]);
 
   // Transformations
   const handleRotate = (deg: 90 | -90) => {
@@ -738,13 +751,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   };
 
   const handleApplyCrop = (cropRect: CropRect) => {
-    const sourceToCrop = imageBgState.type !== 'none' ? compositeCanvas : currentCanvas;
-    const cropped = cropCanvas(sourceToCrop, cropRect);
+    const cropped = cropCanvas(currentCanvas, cropRect);
     const croppedOrig = cropCanvas(currentOriginalCanvas, cropRect);
     pushNewState(cropped, croppedOrig);
-    if (imageBgState.type !== 'none') {
-      setImageBgState(DEFAULT_IMAGE_BG_STATE);
-    }
     setIsCropping(false);
   };
 
@@ -803,21 +812,15 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     const viewportRect = viewport.getBoundingClientRect();
     if (canvasRect.width <= 0 || canvasRect.height <= 0) return null;
 
-    const isExpandedBg = imageBgState.type === 'image' && Boolean(imageBgState.imageElement);
-    const bgW = isExpandedBg ? imageBgState.imageElement!.width : currentCanvas.width;
-    const bgH = isExpandedBg ? imageBgState.imageElement!.height : currentCanvas.height;
-    const ox = isExpandedBg ? Math.round((bgW - currentCanvas.width) / 2) : 0;
-    const oy = isExpandedBg ? Math.round((bgH - currentCanvas.height) / 2) : 0;
-
-    const scaleX = bgW / canvasRect.width;
-    const scaleY = bgH / canvasRect.height;
-    const rawX = (e.clientX - canvasRect.left) * scaleX - ox;
-    const rawY = (e.clientY - canvasRect.top) * scaleY - oy;
+    const scaleX = currentCanvas.width / canvasRect.width;
+    const scaleY = currentCanvas.height / canvasRect.height;
+    const rawX = (e.clientX - canvasRect.left) * scaleX;
+    const rawY = (e.clientY - canvasRect.top) * scaleY;
 
     // Display diameter in viewport screen pixels matching image pixels
     const displayDiameter = Math.max(
       4,
-      Math.round(brushSize * (canvasRect.width / bgW))
+      Math.round(brushSize * (canvasRect.width / currentCanvas.width))
     );
 
     return {
@@ -827,7 +830,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       viewportY: e.clientY - viewportRect.top,
       displayDiameter,
     };
-  }, [currentCanvas.width, currentCanvas.height, brushSize, imageBgState]);
+  }, [currentCanvas.width, currentCanvas.height, brushSize]);
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if ((toolMode === 'off' && selectionToolMode !== 'wand') || isCropping) return;
@@ -992,9 +995,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
 
 
-  // Viewport Floor / Inspection Grid style (only styles the outer workspace floor)
-  const getViewportBackground = (): React.CSSProperties => {
-    switch (viewportGridMode) {
+  // Viewport background style
+  const getViewportBackground = () => {
+    switch (bgMode) {
       case 'checker-dark':
         return {
           backgroundImage:
@@ -1015,8 +1018,41 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         return { backgroundColor: '#ffffff' };
       case 'dark':
         return { backgroundColor: '#020617' };
+      case 'custom':
+        return { backgroundColor: customBgColor };
+      case 'split':
+        return {
+          backgroundImage:
+            'linear-gradient(45deg, #1e293b 25%, transparent 25%), linear-gradient(-45deg, #1e293b 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #1e293b 75%), linear-gradient(-45deg, transparent 75%, #1e293b 75%)',
+          backgroundSize: '24px 24px',
+          backgroundColor: '#0f172a',
+        };
     }
   };
+
+  // 4 Background options that the single "Bg" button cycles through
+  const BG_MODES: { mode: BackgroundMode; label: string }[] = [
+    { mode: 'checker-dark', label: 'Dark Grid' },
+    { mode: 'checker-light', label: 'Light Grid' },
+    { mode: 'white', label: 'White' },
+    { mode: 'dark', label: 'Dark' },
+  ];
+
+  const handleToggleBg = () => {
+    triggerHaptic('tap');
+    if (isComparing && onToggleCompare) {
+      onToggleCompare();
+    }
+    const currentIndex = BG_MODES.findIndex((item) => item.mode === bgMode);
+    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % BG_MODES.length;
+    setBgMode(BG_MODES[nextIndex].mode);
+  };
+
+  const currentBgInfo =
+    BG_MODES.find((item) => item.mode === bgMode) || {
+      mode: 'checker-dark' as BackgroundMode,
+      label: bgMode === 'split' ? 'Split Compare' : 'Dark Grid',
+    };
 
   return (
     <div className="flex flex-col h-[calc(100dvh-61px)] overflow-hidden bg-slate-950 select-none">
@@ -1045,20 +1081,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             </div>
 
             <div className="font-mono text-[11px] text-slate-300">
-              <span
-                className="font-semibold bg-slate-800/80 px-2 py-1 rounded-lg border border-slate-700/40 inline-flex items-center gap-1"
-                title={
-                  imageBgState.type === 'image' && imageBgState.imageElement
-                    ? `Canvas expanded to match backdrop image (${effectiveWidth}×${effectiveHeight})`
-                    : `Image dimensions (${effectiveWidth}×${effectiveHeight})`
-                }
-              >
-                <span>{hasImage ? `${effectiveWidth}×${effectiveHeight}` : '— × —'}</span>
-                {imageBgState.type === 'image' && imageBgState.imageElement && (
-                  <span className="text-[9px] text-indigo-400 font-bold uppercase">
-                    BG
-                  </span>
-                )}
+              <span className="font-semibold bg-slate-800/80 px-2 py-1 rounded-lg border border-slate-700/40">
+                {hasImage ? `${currentCanvas.width}×${currentCanvas.height}` : '— × —'}
               </span>
             </div>
           </div>
@@ -1099,13 +1123,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       <div className="flex-1 relative min-h-0">
         <div
           ref={viewportRef}
-          className="w-full h-full relative flex items-center justify-center p-3 sm:p-6 overflow-hidden select-none bg-slate-950"
+          style={getViewportBackground()}
+          className="w-full h-full relative flex items-center justify-center p-3 sm:p-6 overflow-hidden select-none"
         >
-          {/* Viewport Backdrop Layer */}
-          <div
-            className="absolute inset-0 pointer-events-none z-0 overflow-hidden"
-            style={getViewportBackground()}
-          />
           {/* Bump-Out docked along the left edge for Off, Eraser, and Restore Brush tools */}
           <BumpOutToolbar
             toolMode={toolMode}
@@ -1198,34 +1218,15 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             <div className="absolute inset-0 bg-white/60 pointer-events-none z-50 animate-out fade-out duration-200" />
           )}
 
-          {/* Floating Viewport Grid Floor Toggle Button */}
+          {/* Floating Background Toggle Button */}
           <button
-            onClick={() => {
-              triggerHaptic('tap');
-              const modes: { mode: ViewportGridMode; label: string }[] = [
-                { mode: 'checker-dark', label: 'Dark Grid' },
-                { mode: 'checker-light', label: 'Light Grid' },
-                { mode: 'white', label: 'White' },
-                { mode: 'dark', label: 'Dark Slate' },
-              ];
-              const idx = modes.findIndex((m) => m.mode === viewportGridMode);
-              const next = modes[(idx + 1) % modes.length].mode;
-              setViewportGridMode(next);
-            }}
-            className="absolute top-2.5 right-2.5 sm:top-3 sm:right-3 z-30 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white backdrop-blur-md border border-slate-700/80 hover:border-slate-600 shadow-xl shadow-black/40 text-xs font-medium transition active:scale-95 cursor-pointer select-none"
-            title="Toggle viewport transparency grid floor (Dark Grid → Light Grid → White → Dark Slate)"
-            aria-label={`Toggle viewport grid floor, currently ${viewportGridMode}`}
+            onClick={handleToggleBg}
+            className="absolute top-2.5 right-2.5 sm:top-3 sm:right-3 z-30 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white backdrop-blur-md border border-slate-700/80 hover:border-slate-600 shadow-xl shadow-black/40 text-xs font-medium transition active:scale-95 cursor-pointer select-none"
+            title="Toggle background mode (Dark Grid → Light Grid → White → Dark)"
+            aria-label={`Toggle background mode, currently ${currentBgInfo.label}`}
           >
-            <span className="font-semibold text-slate-400">Grid:</span>
-            <span className="text-slate-100 font-semibold">
-              {viewportGridMode === 'checker-dark'
-                ? 'Dark Grid'
-                : viewportGridMode === 'checker-light'
-                ? 'Light Grid'
-                : viewportGridMode === 'white'
-                ? 'White'
-                : 'Dark Slate'}
-            </span>
+            <span className="font-semibold text-slate-400">BG:</span>
+            <span className="text-slate-100">{currentBgInfo.label}</span>
           </button>
 
           {/* Circular Brush Reticle Indicator */}
@@ -1299,7 +1300,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               )}
 
               {/* Before/After Split Comparison Slider */}
-              {isComparing && (
+              {bgMode === 'split' && (
                 <div
                   style={{ left: `${splitPos}%`, touchAction: 'none' }}
                   className="absolute top-0 bottom-0 -ml-4 w-8 flex items-center justify-center cursor-ew-resize pointer-events-auto z-10 touch-none"
@@ -1338,8 +1339,8 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               {/* Interactive Crop Overlay */}
               {isCropping && (
                 <CropOverlay
-                  imageWidth={effectiveWidth}
-                  imageHeight={effectiveHeight}
+                  imageWidth={currentCanvas.width}
+                  imageHeight={currentCanvas.height}
                   containerWidth={previewCanvasRef.current?.clientWidth || viewportDims.width}
                   containerHeight={previewCanvasRef.current?.clientHeight || viewportDims.height}
                   zoomLevel={zoomLevel}
@@ -1508,17 +1509,6 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
             </div>
           )}
 
-          {/* TAB: BACKDROP (IMAGE BACKGROUND LAYER) */}
-          {activeTab === 'backdrop' && (
-            <BackgroundShelf
-              bgState={imageBgState}
-              onChangeBgState={setImageBgState}
-              onOpenFullModal={() => setShowBgModal(true)}
-              cutoutWidth={currentCanvas.width}
-              cutoutHeight={currentCanvas.height}
-            />
-          )}
-
           {/* TAB: TRANSFORM (ROTATE & FLIP) */}
           {activeTab === 'transform' && (
             <div className="flex items-center justify-center sm:justify-start gap-2 animate-in fade-in duration-150">
@@ -1576,10 +1566,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
             {/* Tab: Resize */}
             <button
-              onClick={() => {
-                setActiveTab('resize');
-                setIsCropping(false);
-              }}
+              onClick={() => setActiveTab('resize')}
               className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition active:scale-95 cursor-pointer ${
                 activeTab === 'resize'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
@@ -1590,31 +1577,9 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               <span>Resize</span>
             </button>
 
-            {/* Tab: Backdrop (Non-destructive image background layer) */}
-            <button
-              onClick={() => {
-                setActiveTab('backdrop');
-                setIsCropping(false);
-              }}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition active:scale-95 cursor-pointer ${
-                activeTab === 'backdrop'
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-              }`}
-            >
-              <Palette className="w-4 h-4 text-emerald-400" />
-              <span>Backdrop</span>
-              {imageBgState.type !== 'none' && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 ml-0.5" />
-              )}
-            </button>
-
             {/* Tab: Transform */}
             <button
-              onClick={() => {
-                setActiveTab('transform');
-                setIsCropping(false);
-              }}
+              onClick={() => setActiveTab('transform')}
               className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition active:scale-95 cursor-pointer ${
                 activeTab === 'transform'
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
@@ -1638,10 +1603,10 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         />
       )}
 
-      {/* Save As & Share Modal (Passes compositeCanvas so background layer is burned into file exports) */}
+      {/* Save As & Share Modal */}
       {showSaveAsModal && (
         <SaveAsModal
-          canvas={compositeCanvas}
+          canvas={currentCanvas}
           originalFilename={originalFilename}
           originalFileSize={originalFileSize}
           onClose={() => setShowSaveAsModal(false)}
@@ -1651,62 +1616,16 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
       {/* Sprite Slideshow & Animation Preview Modal */}
       {slideshowConfig && hasImage && (
         <SpriteSlideshowModal
-          sourceCanvas={compositeCanvas}
+          sourceCanvas={currentCanvas}
           frameWidth={slideshowConfig.frameWidth}
           frameHeight={slideshowConfig.frameHeight}
           initialCol={slideshowConfig.col}
           initialRow={slideshowConfig.row}
-          imageWidth={compositeCanvas.width}
-          imageHeight={compositeCanvas.height}
+          imageWidth={currentCanvas.width}
+          imageHeight={currentCanvas.height}
           onSelectFrame={handleSelectSlideshowFrame}
           onClose={() => setSlideshowConfig(null)}
           showToast={showToast}
-        />
-      )}
-
-      {/* Background Color & Image Settings Modal */}
-      {showBgModal && (
-        <BackgroundModal
-          currentMode={imageBgState.type === 'image' ? 'image' : 'custom'}
-          currentColor={imageBgState.color}
-          currentImageUrl={imageBgState.imageUrl}
-          currentImageFit={imageBgState.imageFit}
-          currentImageBlur={imageBgState.imageBlur}
-          onApply={({ mode, color, imageUrl, imageFit, imageBlur }) => {
-            if (mode === 'image' && imageUrl) {
-              const img = new Image();
-              img.crossOrigin = 'anonymous';
-              img.onload = () => {
-                setImageBgState({
-                  type: 'image',
-                  color: color || '#000000',
-                  imageUrl,
-                  imageElement: img,
-                  imageFit,
-                  imageBlur,
-                });
-              };
-              img.src = imageUrl;
-            } else {
-              setImageBgState({
-                type: 'color',
-                color: color || '#000000',
-                imageUrl: null,
-                imageElement: null,
-                imageFit,
-                imageBlur,
-              });
-            }
-            setShowBgModal(false);
-            showToast(
-              mode === 'image' ? 'Image Backdrop Applied' : 'Solid Background Applied',
-              mode === 'image'
-                ? 'Canvas expanded to match backdrop dimensions'
-                : `Background color set to ${color || '#000000'}`,
-              'success'
-            );
-          }}
-          onClose={() => setShowBgModal(false)}
         />
       )}
 
