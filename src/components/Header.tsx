@@ -75,8 +75,13 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Logo, Brand & Remove Background Dropdown Button */}
           <div className="flex items-center gap-2.5 sm:gap-4 flex-wrap">
             <div className="flex items-center gap-2 sm:gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 shadow-md shadow-indigo-500/20 shrink-0">
-                <Scissors className="h-5 w-5 text-white transform -rotate-45" />
+              <div className="relative flex h-9 w-9 items-center justify-center rounded-xl overflow-hidden border border-slate-700/60 bg-slate-900 shadow-md shadow-indigo-500/20 shrink-0">
+                <img
+                  src="/icon.svg"
+                  alt="ClearCut STUDIO"
+                  referrerPolicy="no-referrer"
+                  className="h-full w-full object-cover"
+                />
               </div>
               <div>
                 <div className="flex items-center gap-2">
