@@ -5,8 +5,26 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 }
 
+let globalDeferredPrompt: BeforeInstallPromptEvent | null = null;
+const promptListeners = new Set<(prompt: BeforeInstallPromptEvent | null) => void>();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    globalDeferredPrompt = e as BeforeInstallPromptEvent;
+    promptListeners.forEach((listener) => listener(globalDeferredPrompt));
+  });
+
+  window.addEventListener('appinstalled', () => {
+    globalDeferredPrompt = null;
+    promptListeners.forEach((listener) => listener(null));
+  });
+}
+
 export function usePWAInstall() {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(
+    () => globalDeferredPrompt
+  );
   const [isInstalled, setIsInstalled] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
 
@@ -22,22 +40,14 @@ export function usePWAInstall() {
     const isIOSDevice = /iphone|ipad|ipod/.test(userAgent);
     setIsIOS(isIOSDevice);
 
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
+    const handlePromptChange = (prompt: BeforeInstallPromptEvent | null) => {
+      setDeferredPrompt(prompt);
     };
 
-    const handleAppInstalled = () => {
-      setIsInstalled(true);
-      setDeferredPrompt(null);
-    };
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    window.addEventListener('appinstalled', handleAppInstalled);
+    promptListeners.add(handlePromptChange);
 
     return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', handleAppInstalled);
+      promptListeners.delete(handlePromptChange);
     };
   }, []);
 
