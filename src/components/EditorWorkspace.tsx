@@ -85,6 +85,7 @@ interface EditorWorkspaceProps {
   isComparing?: boolean;
   onToggleCompare?: () => void;
   onOpenImageClick?: () => void;
+  onImageDropped?: (file: File | Blob, filename?: string) => void;
 }
 
 type BackgroundMode = 'checker-dark' | 'checker-light' | 'white' | 'dark' | 'custom' | 'split';
@@ -107,6 +108,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   isComparing,
   onToggleCompare,
   onOpenImageClick,
+  onImageDropped,
 }) => {
   const hasImage = Boolean(originalImage && initialCutoutCanvas);
 
@@ -1466,6 +1468,23 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
               onClick={() => {
                 triggerHaptic('tap');
                 onOpenImageClick?.();
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const file = e.dataTransfer.files?.[0];
+                if (file && file.type.startsWith('image/')) {
+                  triggerHaptic('tap');
+                  if (onImageDropped) {
+                    onImageDropped(file, file.name);
+                  } else {
+                    onOpenImageClick?.();
+                  }
+                }
               }}
               className="group relative flex flex-col items-center justify-center rounded-3xl border-2 border-dashed border-slate-700/60 hover:border-indigo-500/60 bg-slate-900/50 hover:bg-slate-900/70 p-8 sm:p-14 text-center transition-all duration-200 cursor-pointer shadow-2xl max-w-md w-full mx-4"
             >

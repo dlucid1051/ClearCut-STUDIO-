@@ -11,6 +11,7 @@ import {
   ZoomOut,
   Repeat,
   Check,
+  CheckCircle2,
   Camera,
   Layers,
   FolderArchive,
@@ -18,7 +19,12 @@ import {
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { triggerHaptic } from '../utils/haptics';
-import { canvasToPngBlob, downloadBlob, copyImageToClipboard } from '../utils/imageProcessing';
+import {
+  canvasToPngBlob,
+  canvasToWebpBlob,
+  downloadBlob,
+  copyImageToClipboard,
+} from '../utils/imageProcessing';
 
 interface SpriteSlideshowModalProps {
   sourceCanvas: HTMLCanvasElement;
@@ -84,9 +90,20 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
   const [startFrame, setStartFrame] = useState<number>(0);
   const [endFrame, setEndFrame] = useState<number>(totalFrames - 1);
 
-  // Capture all frames state
+  // Capture all frames & export modal state
+  const [showExportModal, setShowExportModal] = useState<boolean>(false);
+  const [exportFormat, setExportFormat] = useState<'png' | 'webp'>('png');
+  const [webpQuality, setWebpQuality] = useState<number>(0.95);
   const [isCapturingAll, setIsCapturingAll] = useState<boolean>(false);
-  const [captureProgress, setCaptureProgress] = useState<{ current: number; total: number } | null>(null);
+  const [exportPercent, setExportPercent] = useState<number>(0);
+  const [exportStageMessage, setExportStageMessage] = useState<string>('');
+  const [exportSuccess, setExportSuccess] = useState<boolean>(false);
+
+  // Donut Progress Meter dimensions
+  const DONUT_RADIUS = 38;
+  const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_RADIUS; // ~238.76
+  const strokeDashoffset =
+    DONUT_CIRCUMFERENCE - (Math.min(100, Math.max(0, exportPercent)) / 100) * DONUT_CIRCUMFERENCE;
 
   // References
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -185,13 +202,20 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
         triggerHaptic('light');
         prevFrame();
       } else if (e.code === 'Escape') {
-        onClose();
+        if (showExportModal) {
+          if (!isCapturingAll) {
+            triggerHaptic('tap');
+            setShowExportModal(false);
+          }
+        } else {
+          onClose();
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextFrame, prevFrame, onClose]);
+  }, [nextFrame, prevFrame, onClose, showExportModal, isCapturingAll]);
 
   // Render current frame to the preview canvas
   useEffect(() => {
@@ -335,12 +359,18 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
     }
   };
 
-  // Capture ALL frames into a bundled ZIP archive (individual PNG frames + sprite sheet strip)
-  const handleCaptureAllFrames = async () => {
+  // Capture ALL frames into a bundled ZIP archive with user-selected format (PNG or WebP)
+  const handleStartExport = async () => {
     if (isCapturingAll || totalFrames <= 0) return;
     triggerHaptic('medium');
     setIsCapturingAll(true);
-    setCaptureProgress({ current: 0, total: totalFrames });
+    setExportPercent(2);
+    setExportSuccess(false);
+    setExportStageMessage(`Preparing ${totalFrames} frames...`);
+
+    const format = exportFormat;
+    const isWebp = format === 'webp';
+    const ext = isWebp ? 'webp' : 'png';
 
     try {
       const zip = new JSZip();
@@ -359,7 +389,12 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
 
       // Generate individual frames and assemble strip
       for (let i = 0; i < totalFrames; i++) {
-        setCaptureProgress({ current: i + 1, total: totalFrames });
+        const frameNum = i + 1;
+        const framePercent = Math.max(3, Math.round((frameNum / totalFrames) * 70));
+        setExportPercent(framePercent);
+        setExportStageMessage(
+          `Extracting frame ${frameNum} of ${totalFrames} (${ext.toUpperCase()})...`
+        );
 
         const coords = getFrameCoords(i);
         const frameCanvas = document.createElement('canvas');
@@ -403,48 +438,73 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
             );
           }
 
-          const blob = await canvasToPngBlob(frameCanvas);
-          const numStr = String(i + 1).padStart(padDigits, '0');
-          zip.file(`frame_${numStr}_col${coords.col}_row${coords.row}.png`, blob);
+          const blob = isWebp
+            ? await canvasToWebpBlob(frameCanvas, webpQuality)
+            : await canvasToPngBlob(frameCanvas);
+          const numStr = String(frameNum).padStart(padDigits, '0');
+          zip.file(`frame_${numStr}_col${coords.col}_row${coords.row}.${ext}`, blob);
         }
 
         // Brief yield for UI responsiveness on large frame counts
-        if (i % 6 === 0) {
+        if (i % 4 === 0) {
           await new Promise((r) => setTimeout(r, 0));
         }
       }
 
       // Add the assembled horizontal sprite sheet strip
+      setExportPercent(74);
+      setExportStageMessage(`Assembling ${ext.toUpperCase()} animation strip...`);
       if (stripCtx) {
-        const stripBlob = await canvasToPngBlob(stripCanvas);
+        const stripBlob = isWebp
+          ? await canvasToWebpBlob(stripCanvas, webpQuality)
+          : await canvasToPngBlob(stripCanvas);
         zip.file(
-          `spritesheet_strip_${totalFrames}frames_${frameWidth * totalFrames}x${frameHeight}.png`,
+          `spritesheet_strip_${totalFrames}frames_${frameWidth * totalFrames}x${frameHeight}.${ext}`,
           stripBlob
         );
       }
 
+      setExportPercent(78);
+      setExportStageMessage('Compressing frames into ZIP archive...');
+
       const now = new Date();
       const pad = (n: number) => String(n).padStart(2, '0');
       const timeTag = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const zipFilename = `sprite-frames-${totalFrames}pcs-${frameWidth}x${frameHeight}-${timeTag}.zip`;
+      const zipFilename = `sprite-frames-${totalFrames}pcs-${ext}-${frameWidth}x${frameHeight}-${timeTag}.zip`;
 
-      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const zipBlob = await zip.generateAsync({ type: 'blob' }, (metadata) => {
+        const zipFraction = Math.max(0, Math.min(1, metadata.percent / 100));
+        const pct = Math.round(78 + zipFraction * 21);
+        setExportPercent(pct);
+        setExportStageMessage(`Compressing ZIP archive (${Math.round(metadata.percent)}%)...`);
+      });
+
+      setExportPercent(100);
+      setExportStageMessage('ZIP ready! Downloading...');
+      setExportSuccess(true);
       await downloadBlob(zipBlob, zipFilename);
 
       triggerHaptic('success');
       showToast?.(
         'All Frames Captured!',
-        `Saved ${totalFrames} frames & sprite strip in ${zipFilename}.`,
+        `Saved ${totalFrames} ${ext.toUpperCase()} frames & sprite strip in ${zipFilename}.`,
         'success',
         3500
       );
+
+      // Auto-close modal after brief celebration
+      setTimeout(() => {
+        setShowExportModal(false);
+        setIsCapturingAll(false);
+        setExportSuccess(false);
+        setExportPercent(0);
+      }, 1200);
     } catch (err) {
       console.error('Failed to capture all frames:', err);
       triggerHaptic('error');
+      setExportStageMessage('Export failed. Please try again.');
       showToast?.('Export Failed', 'Could not generate frame zip archive.', 'error');
-    } finally {
       setIsCapturingAll(false);
-      setCaptureProgress(null);
     }
   };
 
@@ -780,24 +840,16 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
             </button>
 
             <button
-              onClick={handleCaptureAllFrames}
+              onClick={() => {
+                triggerHaptic('tap');
+                setShowExportModal(true);
+              }}
               disabled={isCapturingAll}
               className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border border-indigo-500/50 bg-indigo-950/70 hover:bg-indigo-900/70 text-indigo-200 text-xs font-bold transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-md shadow-indigo-950/40"
-              title={`Export all ${totalFrames} frames as individual transparent PNGs + sprite strip in a ZIP archive`}
+              title={`Export all ${totalFrames} frames as individual transparent PNG or WebP images + sprite strip in a ZIP archive`}
             >
-              {isCapturingAll ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-300" />
-                  <span>
-                    Packaging {captureProgress ? `${captureProgress.current}/${captureProgress.total}` : '...'}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <FolderArchive className="w-3.5 h-3.5 text-indigo-300" />
-                  <span>Capture All Frames ({totalFrames})</span>
-                </>
-              )}
+              <FolderArchive className="w-3.5 h-3.5 text-indigo-300" />
+              <span>Capture All Frames ({totalFrames})</span>
             </button>
           </div>
 
@@ -825,6 +877,269 @@ export const SpriteSlideshowModal: React.FC<SpriteSlideshowModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Export Format & Donut Progress Modal */}
+      {showExportModal && (
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+          onClick={() => {
+            if (!isCapturingAll) {
+              triggerHaptic('tap');
+              setShowExportModal(false);
+            }
+          }}
+        >
+          <div
+            className="relative w-full max-w-sm rounded-2xl border border-slate-700/80 bg-slate-900 shadow-2xl p-5 text-slate-100 animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-400">
+                  <FolderArchive className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-white">
+                    {isCapturingAll ? 'Exporting Frames ZIP' : 'Capture All Frames'}
+                  </h4>
+                  <p className="text-[11px] text-slate-400">
+                    {totalFrames} frames • {frameWidth}×{frameHeight}px
+                  </p>
+                </div>
+              </div>
+
+              {!isCapturingAll && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('tap');
+                    setShowExportModal(false);
+                  }}
+                  className="rounded-lg p-1 text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                  title="Close"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Modal Body: Donut Progress Meter or Format Selection */}
+            {isCapturingAll ? (
+              /* Donut Progress Meter State */
+              <div className="py-6 flex flex-col items-center justify-center">
+                <div className="relative flex items-center justify-center">
+                  <svg className="w-28 h-28 transform -rotate-90" viewBox="0 0 100 100">
+                    <defs>
+                      <linearGradient id="donutProgressGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#6366f1" />
+                        <stop offset="50%" stopColor="#8b5cf6" />
+                        <stop offset="100%" stopColor="#ec4899" />
+                      </linearGradient>
+                    </defs>
+                    {/* Background Track */}
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r={DONUT_RADIUS}
+                      stroke="rgba(51, 65, 85, 0.4)"
+                      strokeWidth="7"
+                      fill="transparent"
+                    />
+                    {/* Dynamic Progress Ring */}
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r={DONUT_RADIUS}
+                      stroke="url(#donutProgressGrad)"
+                      strokeWidth="7"
+                      strokeDasharray={DONUT_CIRCUMFERENCE}
+                      strokeDashoffset={strokeDashoffset}
+                      strokeLinecap="round"
+                      fill="transparent"
+                      className="transition-all duration-200 ease-out"
+                    />
+                  </svg>
+
+                  {/* Centered Percentage & Format */}
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    {exportSuccess ? (
+                      <CheckCircle2 className="w-10 h-10 text-emerald-400 animate-in zoom-in-75 duration-200" />
+                    ) : (
+                      <>
+                        <span className="text-2xl font-black text-white tracking-tight">
+                          {Math.round(exportPercent)}%
+                        </span>
+                        <span className="text-[10px] uppercase font-bold text-indigo-300 tracking-wider">
+                          {exportFormat}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Progress Details */}
+                <div className="mt-4 text-center px-2">
+                  <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-slate-200">
+                    {!exportSuccess && (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400 shrink-0" />
+                    )}
+                    <span className="truncate max-w-[240px]">
+                      {exportStageMessage || 'Packaging ZIP...'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    {exportSuccess
+                      ? 'ZIP archive downloaded successfully'
+                      : `Building ZIP with ${totalFrames} frames + sprite strip`}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              /* Format Options State */
+              <div className="pt-3">
+                <p className="text-xs text-slate-300 mb-2.5 font-medium">
+                  Choose frame image format:
+                </p>
+
+                <div className="space-y-2 mb-3">
+                  {/* PNG Option (Default) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('tap');
+                      setExportFormat('png');
+                    }}
+                    className={`w-full text-left p-3 rounded-xl border transition cursor-pointer flex items-start gap-3 ${
+                      exportFormat === 'png'
+                        ? 'border-indigo-500 bg-indigo-950/40 ring-1 ring-indigo-500/50'
+                        : 'border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-800/40'
+                    }`}
+                  >
+                    <div
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                        exportFormat === 'png'
+                          ? 'border-indigo-500 bg-indigo-500 text-white'
+                          : 'border-slate-600'
+                      }`}
+                    >
+                      {exportFormat === 'png' && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-white">PNG Format</span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                          Default • Lossless
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Lossless alpha transparency. Universal compatibility for game engines, Godot, Unity, and sprite sheets.
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* WebP Option */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('tap');
+                      setExportFormat('webp');
+                    }}
+                    className={`w-full text-left p-3 rounded-xl border transition cursor-pointer flex items-start gap-3 ${
+                      exportFormat === 'webp'
+                        ? 'border-purple-500 bg-purple-950/40 ring-1 ring-purple-500/50'
+                        : 'border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-800/40'
+                    }`}
+                  >
+                    <div
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                        exportFormat === 'webp'
+                          ? 'border-purple-500 bg-purple-500 text-white'
+                          : 'border-slate-600'
+                      }`}
+                    >
+                      {exportFormat === 'webp' && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-white">WebP Format</span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                          Compact • Smaller ZIP
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Modern web format with transparency. Dramatically reduces ZIP size by up to 60-80% with high visual fidelity.
+                      </p>
+                    </div>
+                  </button>
+                </div>
+
+                {/* WebP Quality Preset selector */}
+                {exportFormat === 'webp' && (
+                  <div className="mb-3 p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-300 font-medium">
+                      WebP Quality: <strong className="text-white">{Math.round(webpQuality * 100)}%</strong>
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {[
+                        { label: '85%', val: 0.85 },
+                        { label: '95%', val: 0.95 },
+                        { label: '100%', val: 1.0 },
+                      ].map((item) => (
+                        <button
+                          key={item.label}
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic('tap');
+                            setWebpQuality(item.val);
+                          }}
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold transition cursor-pointer ${
+                            webpQuality === item.val
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-slate-800 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="p-2.5 rounded-xl bg-slate-950/40 border border-slate-800/80 mb-4 text-[11px] text-slate-400">
+                  <span className="text-slate-300 font-semibold">ZIP package contains:</span> all {totalFrames} individual {exportFormat.toUpperCase()} frames + 1 combined animation strip.
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('tap');
+                      setShowExportModal(false);
+                    }}
+                    className="px-3.5 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartExport}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-purple-600 to-pink-600 hover:from-indigo-600 hover:to-pink-700 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition active:scale-95 cursor-pointer"
+                  >
+                    <FolderArchive className="w-3.5 h-3.5" />
+                    <span>Export {exportFormat.toUpperCase()} ZIP</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Header } from './components/Header';
 import { OpenImageModal } from './components/OpenImageModal';
 import { ProcessingOverlay } from './components/ProcessingOverlay';
@@ -15,6 +15,7 @@ import {
   canvasToPngBlob,
   fallbackSmartBackgroundRemoval,
 } from './utils/imageProcessing';
+import { triggerHaptic } from './utils/haptics';
 import { removeBackground } from '@imgly/background-removal';
 
 export default function App() {
@@ -25,8 +26,17 @@ export default function App() {
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
   const [initialCutoutCanvas, setInitialCutoutCanvas] = useState<HTMLCanvasElement | null>(null);
 
-  // Open Image modal state - opens over the main page on app start (user must pick an image)
-  const [isOpenImageModal, setIsOpenImageModal] = useState<boolean>(true);
+  // Open Image modal state - defaults to closed so the main screen and native file picker take precedence
+  const [isOpenImageModal, setIsOpenImageModal] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleOpenFilePicker = useCallback(() => {
+    triggerHaptic('tap');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }, []);
 
   // Processing state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -219,7 +229,7 @@ export default function App() {
     setProgress(0);
     setStage('');
     setIsComparing(false);
-    setIsOpenImageModal(true);
+    setIsOpenImageModal(false);
     if (pendingResolveRef.current) {
       pendingResolveRef.current(null);
       pendingResolveRef.current = null;
@@ -228,8 +238,49 @@ export default function App() {
     editorRemoveBgTriggerRef.current = null;
   };
 
+  // Global paste support (Ctrl+V / Cmd+V) to open image directly from clipboard
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const file = items[i].getAsFile();
+          if (file) {
+            triggerHaptic('tap');
+            handleImageSelected(file, 'pasted-image.png');
+            break;
+          }
+        }
+      }
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [handleImageSelected]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+      {/* Hidden Native File Picker Input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            handleImageSelected(file, file.name);
+          }
+          e.target.value = '';
+        }}
+        className="hidden"
+        style={{ display: 'none' }}
+        aria-hidden="true"
+      />
+
       {/* Top Navigation & App Bar */}
       <Header
         hasImage={!!originalImage}
@@ -263,7 +314,8 @@ export default function App() {
           }}
           isComparing={isComparing}
           onToggleCompare={() => setIsComparing((prev) => !prev)}
-          onOpenImageClick={() => setIsOpenImageModal(true)}
+          onOpenImageClick={handleOpenFilePicker}
+          onImageDropped={handleImageSelected}
         />
       </main>
 
