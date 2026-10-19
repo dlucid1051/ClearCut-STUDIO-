@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { triggerHaptic } from '../utils/haptics';
+import appIconUrl from '../assets/icon.svg';
 
 interface HeaderProps {
   hasImage: boolean;
@@ -77,10 +78,17 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex items-center gap-2 sm:gap-3">
               <div className="relative flex h-9 w-9 items-center justify-center rounded-xl overflow-hidden border border-slate-700/60 bg-slate-900 shadow-md shadow-indigo-500/20 shrink-0">
                 <img
-                  src="/icon.svg"
+                  src={appIconUrl}
                   alt="ClearCut STUDIO"
                   referrerPolicy="no-referrer"
                   className="h-full w-full object-cover"
+                  onError={(e) => {
+                    const target = e.currentTarget;
+                    if (!target.dataset.fallbackTried) {
+                      target.dataset.fallbackTried = 'true';
+                      target.src = `${import.meta.env.BASE_URL}icon.svg`;
+                    }
+                  }}
                 />
               </div>
               <div>
